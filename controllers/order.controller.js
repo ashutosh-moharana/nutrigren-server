@@ -62,7 +62,7 @@ const createRazorpayOrder = async (req, res) => {
       razorpayOrder = await razorpay.orders.create({
         amount: amountInPaise,
         currency: "INR",
-        receipt: `nutrigren_${Date.now()}`,
+        receipt: `pepalbarry_${Date.now()}`,
       });
     }
 
@@ -143,7 +143,13 @@ const verifyRazorpayPayment = async (req, res) => {
 
 const getUserOrders = async (req, res) => {
   try {
-    const orders = await Order.find({ user: req.user.userId })
+    const orders = await Order.find({
+      user: req.user.userId,
+      $or: [
+        { mode: "Cash On Delivery" },
+        { mode: "Razorpay", paymentStatus: "paid" },
+      ],
+    })
       .populate("products.productId")
       .sort({ createdAt: -1 });
     res.status(200).json({ success: true, orders });
@@ -155,7 +161,12 @@ const getUserOrders = async (req, res) => {
 
 const getAllOrders = async (req, res) => {
   try {
-    const orders = await Order.find({})
+    const orders = await Order.find({
+      $or: [
+        { mode: "Cash On Delivery" },
+        { mode: "Razorpay", paymentStatus: "paid" },
+      ],
+    })
       .populate("products.productId")
       .populate("user", "name email")
       .sort({ createdAt: -1 });
@@ -191,6 +202,56 @@ const updateOrderStatus = async (req, res) => {
   }
 };
 
+const handleRazorpayWebhook = async (req, res) => {
+  try {
+    const secret = process.env.RAZORPAY_WEBHOOK_SECRET || "webhook_secret";
+    const signature = req.headers["x-razorpay-signature"];
+
+    if (!signature) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Missing signature" });
+    }
+
+    const generatedSignature = crypto
+      .createHmac("sha256", secret)
+      .update(JSON.stringify(req.body))
+      .digest("hex");
+
+    if (generatedSignature !== signature) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid signature" });
+    }
+
+    const event = req.body;
+
+    if (event.event === "payment.captured") {
+      const { order_id, id: payment_id } = event.payload.payment.entity;
+
+      const order = await Order.findOneAndUpdate(
+        { razorpayOrderId: order_id },
+        {
+          paymentStatus: "paid",
+          razorpayPaymentId: payment_id,
+        },
+        { new: true }
+      );
+
+      if (order) {
+        console.log(`Order ${order._id} marked as paid via webhook`);
+      } else {
+        console.warn(`Order not found for Razorpay Order ID: ${order_id}`);
+      }
+    }
+
+    res.status(200).json({ success: true });
+  } catch (error) {
+    console.error("Webhook processing failed", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
 module.exports = {
   createCODOrder,
   createRazorpayOrder,
@@ -198,4 +259,5 @@ module.exports = {
   getUserOrders,
   getAllOrders,
   updateOrderStatus,
+  handleRazorpayWebhook,
 };
